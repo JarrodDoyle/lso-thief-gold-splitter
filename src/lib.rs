@@ -21,11 +21,6 @@ struct Settings {
 }
 
 #[derive(Default)]
-struct RunProgress {
-    constantine_ritual_split: bool,
-}
-
-#[derive(Default)]
 struct MemoryAddresses {
     base: Option<asr::Address>,
     miss_idx: u64,
@@ -48,7 +43,6 @@ struct State {
     main_process: Option<Process>,
     addresses: Lazy<MemoryAddresses>,
     values: Lazy<MemoryValues>,
-    game: Option<Game>,
     settings: Option<Settings>,
 }
 
@@ -203,13 +197,10 @@ impl State {
     }
 }
 
-struct Game {}
-
 static STATE: Spinlock<State> = const_spinlock(State {
     main_process: None,
     addresses: Lazy::new(Default::default),
     values: Lazy::new(Default::default),
-    game: None,
     settings: None,
 });
 
