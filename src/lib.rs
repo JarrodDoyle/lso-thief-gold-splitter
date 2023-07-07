@@ -1,8 +1,10 @@
 #![no_std]
 
-// extern crate alloc;
+#[macro_use]
+extern crate alloc;
+use alloc::format;
 // use alloc::string::String;
-use asr::Process;
+use asr::{Address, Process};
 use once_cell::sync::Lazy;
 use spinning_top::{const_spinlock, Spinlock};
 
@@ -28,6 +30,7 @@ struct RunProgress {
 #[derive(Default)]
 struct MemoryAddresses {
     main_address: Option<asr::Address>,
+    igt: Option<asr::Address>,
 }
 
 struct State {
@@ -58,12 +61,14 @@ impl State {
 
         asr::print_message("WE CONNECTED LADS");
 
+        // self.addresses.igt = Some(self.addresses.main_address.unwrap().add(0x4C6234));
+
         asr::set_tick_rate(RUNNING_TICK_RATE);
         Ok(())
     }
 
     fn update(&mut self) {
-        let settings = self.settings.get_or_insert_with(Settings::register);
+        // let settings = self.settings.get_or_insert_with(Settings::register);
 
         match &self.main_process {
             None => {
@@ -85,6 +90,39 @@ impl State {
                     return;
                 }
             }
+        }
+
+        // !HACK: TEST IL SPLITTING
+        let main_process = self.main_process.as_ref().unwrap();
+        let main_address = self.addresses.main_address.unwrap();
+
+        let igt = main_process
+            .read::<i32>(main_address.add(0x4C6234))
+            .unwrap();
+        let menu_state = main_process
+            .read::<i32>(main_address.add(0x3D8808))
+            .unwrap();
+        let loading = main_process
+            .read::<i32>(main_address.add(0x3D89B0))
+            .unwrap();
+
+        if igt == 0 && menu_state == 10 {
+            asr::timer::reset();
+            asr::timer::start();
+        }
+
+        if menu_state == 13 {
+            asr::timer::split();
+        }
+
+        if menu_state == 7 || menu_state == 9 {
+            asr::timer::reset();
+        }
+
+        if (loading != 0 && menu_state != 9) || menu_state == 6 || menu_state == 12 {
+            asr::timer::pause_game_time();
+        } else {
+            asr::timer::resume_game_time();
         }
     }
 }
