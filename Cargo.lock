@@ -141,6 +141,7 @@ name = "thief-splitter"
 version = "0.1.0"
 dependencies = [
  "asr",
+ "bytemuck",
  "once_cell",
  "spinning_top",
 ]

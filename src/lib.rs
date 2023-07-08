@@ -1,7 +1,7 @@
 #![no_std]
-
+#[macro_use]
 extern crate alloc;
-use alloc::{borrow::ToOwned, format, string::String};
+use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 use asr::Process;
 use once_cell::sync::Lazy;
 use spinning_top::{const_spinlock, Spinlock};
@@ -21,27 +21,60 @@ struct Settings {
 }
 
 #[derive(Default)]
-struct MemoryAddresses {
-    base: Option<asr::Address>,
-    miss_idx: u64,
-    menu_state: u64,
-    is_loading: u64,
-    level_time: u64,
-    cutscene_name: u64,
+struct MemoryValues {
+    miss_idx: Watcher<i32>,
+    menu_state: Watcher<i32>,
+    is_loading: Watcher<i32>,
+    level_time: Watcher<i32>,
+    cutscene_name: Watcher<asr::string::ArrayCString<255>>,
 }
 
-#[derive(Default)]
-struct MemoryValues {
-    miss_idx: asr::watcher::Pair<i32>,
-    menu_state: asr::watcher::Pair<i32>,
-    is_loading: asr::watcher::Pair<i32>,
-    level_time: asr::watcher::Pair<i32>,
-    cutscene_name: asr::watcher::Pair<String>,
+#[derive(Clone)]
+struct Watcher<T> {
+    pair: Option<asr::watcher::Pair<T>>,
+    path: Vec<u64>,
+}
+
+impl<T> Default for Watcher<T> {
+    fn default() -> Self {
+        Self::new(&[])
+    }
+}
+
+impl<T> Watcher<T> {
+    fn new(path: &[u64]) -> Self {
+        Self {
+            pair: None,
+            path: path.to_owned(),
+        }
+    }
+}
+
+impl<T: bytemuck::CheckedBitPattern> Watcher<T> {
+    fn update(
+        &mut self,
+        process: &asr::Process,
+        base: asr::Address,
+    ) -> Result<asr::watcher::Pair<T>, &str> {
+        let new_val = match process.read_pointer_path64(base, &self.path) {
+            Ok(val) => val,
+            Err(_) => return Err("Failed to update value from memory."),
+        };
+
+        let pair = self.pair.get_or_insert(asr::watcher::Pair {
+            old: new_val,
+            current: new_val,
+        });
+        pair.old = pair.current;
+        pair.current = new_val;
+
+        Ok(*pair)
+    }
 }
 
 struct State {
     main_process: Option<Process>,
-    addresses: Lazy<MemoryAddresses>,
+    base_address: Option<asr::Address>,
     values: Lazy<MemoryValues>,
     settings: Option<Settings>,
 }
@@ -55,7 +88,7 @@ impl State {
         }
 
         asr::print_message("--------Getting Module Address--------");
-        self.addresses.base = match &self.main_process {
+        self.base_address = match &self.main_process {
             Some(info) => match info.get_module_address(MAIN_MODULE) {
                 Ok(address) => Some(address),
                 Err(_) => {
@@ -65,11 +98,11 @@ impl State {
             None => return Err("Process info is not initialised."),
         };
 
-        self.addresses.miss_idx = 0x3D8800;
-        self.addresses.menu_state = 0x3D8808;
-        self.addresses.is_loading = 0x3D89B0;
-        self.addresses.level_time = 0x4C6234;
-        self.addresses.cutscene_name = 0x5CF9DE;
+        self.values.miss_idx.path = vec![0x3D8800];
+        self.values.menu_state.path = vec![0x3D8808];
+        self.values.is_loading.path = vec![0x3D89B0];
+        self.values.level_time.path = vec![0x4C6234];
+        self.values.cutscene_name.path = vec![0x5CF9DE];
 
         asr::set_tick_rate(RUNNING_TICK_RATE);
         Ok(())
@@ -93,7 +126,8 @@ impl State {
                 // Games closed so we'll detach and look for it next update
                 if !process.is_open() {
                     self.main_process = None;
-                    self.addresses = Default::default();
+                    self.base_address = None;
+                    self.values = Default::default();
                     asr::set_tick_rate(IDLE_TICK_RATE);
                     return;
                 }
@@ -103,16 +137,17 @@ impl State {
         if let Err(msg) = self.update_mem_values() {
             // Uh oh something fucky happened with the memory. Let's just try reattaching
             // next update?
-            asr::print_message(msg);
+            asr::print_message(&msg);
             self.main_process = None;
-            self.addresses = Default::default();
+            self.base_address = None;
+            self.values = Default::default();
             asr::set_tick_rate(IDLE_TICK_RATE);
             return;
         }
 
-        let igt = self.values.level_time.current;
-        let menu_state = self.values.menu_state.current;
-        let is_loading = self.values.is_loading.current;
+        let igt = self.values.level_time.pair.unwrap().current;
+        let menu_state = self.values.menu_state.pair.unwrap().current;
+        let is_loading = self.values.is_loading.pair.unwrap().current;
 
         if igt == 0 && menu_state == 10 {
             asr::timer::reset();
@@ -134,72 +169,29 @@ impl State {
         }
     }
 
-    fn update_mem_values(&mut self) -> Result<(), &str> {
-        let main_process = match &self.main_process {
+    fn update_mem_values(&mut self) -> Result<(), String> {
+        let process = match &self.main_process {
             Some(process) => process,
-            None => return Err("Could not load main process."),
+            None => return Err("Could not load main process.".to_owned()),
         };
 
-        let main_address = match self.addresses.base {
+        let base = match self.base_address {
             Some(address) => address,
-            None => return Err("Could not load main address."),
+            None => return Err("Could not load base address.".to_owned()),
         };
 
-        let address = main_address.add(self.addresses.miss_idx);
-        let miss_idx = match main_process.read::<i32>(address) {
-            Ok(val) => val,
-            Err(_) => return Err("Failed to update mission index value from memory."),
-        };
-        Self::update_pair_copy(&mut self.values.miss_idx, miss_idx);
-
-        let address = main_address.add(self.addresses.menu_state);
-        let menu_state = match main_process.read::<i32>(address) {
-            Ok(val) => val,
-            Err(_) => return Err("Failed to update menu state value from memory."),
-        };
-        Self::update_pair_copy(&mut self.values.menu_state, menu_state);
-
-        let address = main_address.add(self.addresses.is_loading);
-        let is_loading = match main_process.read::<i32>(address) {
-            Ok(val) => val,
-            Err(_) => return Err("Failed to update loading flag value from memory."),
-        };
-        Self::update_pair_copy(&mut self.values.is_loading, is_loading);
-
-        let address = main_address.add(self.addresses.level_time);
-        let level_time = match main_process.read::<i32>(address) {
-            Ok(val) => val,
-            Err(_) => return Err("Failed to update level IGT value from memory."),
-        };
-        Self::update_pair_copy(&mut self.values.level_time, level_time);
-
-        let address = main_address.add(self.addresses.cutscene_name);
-        let cutscene_name = match main_process.read::<asr::string::ArrayCString<255>>(address) {
-            Ok(cstring) => match cstring.validate_utf8() {
-                Ok(val) => val.to_owned(),
-                Err(_) => return Err("Cutscene name isn't valid UTF8"),
-            },
-            Err(_) => return Err("Failed to update cutscene name value from memory."),
-        };
-        Self::update_pair_clone(&mut self.values.cutscene_name, cutscene_name);
-
+        self.values.miss_idx.update(process, base)?;
+        self.values.menu_state.update(process, base)?;
+        self.values.is_loading.update(process, base)?;
+        self.values.level_time.update(process, base)?;
+        self.values.cutscene_name.update(process, base)?;
         Ok(())
-    }
-
-    fn update_pair_copy<T: Copy>(pair: &mut asr::watcher::Pair<T>, val: T) {
-        pair.old = pair.current;
-        pair.current = val;
-    }
-
-    fn update_pair_clone<T: Clone>(pair: &mut asr::watcher::Pair<T>, val: T) {
-        pair.old = pair.current.clone();
-        pair.current = val;
     }
 }
 
 static STATE: Spinlock<State> = const_spinlock(State {
     main_process: None,
-    addresses: Lazy::new(Default::default),
+    base_address: None,
     values: Lazy::new(Default::default),
     settings: None,
 });
