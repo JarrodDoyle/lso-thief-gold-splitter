@@ -1,7 +1,12 @@
 #![no_std]
 #[macro_use]
 extern crate alloc;
-use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
+use alloc::{
+    borrow::ToOwned,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use asr::Process;
 use once_cell::sync::Lazy;
 use spinning_top::{const_spinlock, Spinlock};
@@ -21,12 +26,20 @@ struct Settings {
 }
 
 #[derive(Default)]
-struct MemoryValues {
+struct MemoryWatchers {
     miss_idx: Watcher<i32>,
     menu_state: Watcher<i32>,
     is_loading: Watcher<i32>,
     level_time: Watcher<i32>,
     cutscene_name: Watcher<asr::string::ArrayCString<255>>,
+}
+
+struct Values {
+    miss_idx: asr::watcher::Pair<i32>,
+    menu_state: asr::watcher::Pair<i32>,
+    is_loading: asr::watcher::Pair<i32>,
+    level_time: asr::watcher::Pair<i32>,
+    cutscene_name: asr::watcher::Pair<String>,
 }
 
 #[derive(Clone)]
@@ -75,7 +88,7 @@ impl<T: bytemuck::CheckedBitPattern> Watcher<T> {
 struct State {
     main_process: Option<Process>,
     base_address: Option<asr::Address>,
-    values: Lazy<MemoryValues>,
+    values: Lazy<MemoryWatchers>,
     settings: Option<Settings>,
 }
 
@@ -131,17 +144,20 @@ impl State {
             }
         }
 
-        if let Err(msg) = self.update_mem_values() {
-            // Uh oh something fucky happened with the memory. Let's just try reattaching
-            // next update?
-            asr::print_message(&msg);
-            self.detach_process();
-            return;
-        }
+        let values = match self.update_mem_values() {
+            Ok(vals) => vals,
+            Err(msg) => {
+                // Uh oh something fucky happened with the memory. Let's just try reattaching
+                // next update?
+                asr::print_message(&msg);
+                self.detach_process();
+                return;
+            }
+        };
 
-        let igt = self.values.level_time.pair.unwrap().current;
-        let menu_state = self.values.menu_state.pair.unwrap().current;
-        let is_loading = self.values.is_loading.pair.unwrap().current;
+        let igt = values.level_time.current;
+        let menu_state = values.menu_state.current;
+        let is_loading = values.is_loading.current;
 
         if igt == 0 && menu_state == 10 {
             asr::timer::reset();
@@ -163,7 +179,7 @@ impl State {
         }
     }
 
-    fn update_mem_values(&mut self) -> Result<(), String> {
+    fn update_mem_values(&mut self) -> Result<Values, String> {
         let process = match &self.main_process {
             Some(process) => process,
             None => return Err("Could not load main process.".to_owned()),
@@ -174,12 +190,19 @@ impl State {
             None => return Err("Could not load base address.".to_owned()),
         };
 
-        self.values.miss_idx.update(process, base)?;
-        self.values.menu_state.update(process, base)?;
-        self.values.is_loading.update(process, base)?;
-        self.values.level_time.update(process, base)?;
-        self.values.cutscene_name.update(process, base)?;
-        Ok(())
+        // Have to do some fuckery here due to cstrings :)
+        let cutscene_name = self.values.cutscene_name.update(process, base)?;
+        let cutscene_name = asr::watcher::Pair::<String> {
+            old: Self::convert_cstring(cutscene_name.old)?,
+            current: Self::convert_cstring(cutscene_name.current)?,
+        };
+        Ok(Values {
+            miss_idx: self.values.miss_idx.update(process, base)?,
+            menu_state: self.values.menu_state.update(process, base)?,
+            is_loading: self.values.is_loading.update(process, base)?,
+            level_time: self.values.level_time.update(process, base)?,
+            cutscene_name,
+        })
     }
 
     fn detach_process(&mut self) {
@@ -187,6 +210,13 @@ impl State {
         self.base_address = None;
         self.values = Default::default();
         asr::set_tick_rate(IDLE_TICK_RATE);
+    }
+
+    fn convert_cstring(cstring: asr::string::ArrayCString<255>) -> Result<String, String> {
+        match cstring.validate_utf8() {
+            Ok(val) => Ok(val.to_string()),
+            Err(_) => Err("Failed to convert cstring to string.".to_owned()),
+        }
     }
 }
 
