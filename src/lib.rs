@@ -7,7 +7,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use asr::Process;
+use asr::{timer::TimerState, Process};
 use once_cell::sync::Lazy;
 use spinning_top::{const_spinlock, Spinlock};
 
@@ -34,7 +34,7 @@ struct MemoryWatchers {
     cutscene_name: Watcher<asr::string::ArrayCString<255>>,
 }
 
-struct Values {
+struct Vars {
     miss_idx: asr::watcher::Pair<i32>,
     menu_state: asr::watcher::Pair<i32>,
     is_loading: asr::watcher::Pair<i32>,
@@ -90,6 +90,9 @@ struct State {
     base_address: Option<asr::Address>,
     values: Lazy<MemoryWatchers>,
     settings: Option<Settings>,
+    miss_idx_order: Vec<i32>,
+    split_idx: usize,
+    is_gold: bool,
 }
 
 impl State {
@@ -116,6 +119,10 @@ impl State {
         self.values.is_loading.path = vec![0x3D89B0];
         self.values.level_time.path = vec![0x4C6234];
         self.values.cutscene_name.path = vec![0x5CF9DE];
+
+        self.miss_idx_order = vec![1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14];
+        self.split_idx = 0;
+        self.is_gold = false;
 
         asr::set_tick_rate(RUNNING_TICK_RATE);
         Ok(())
@@ -144,7 +151,7 @@ impl State {
             }
         }
 
-        let values = match self.update_mem_values() {
+        let vars = match self.update_mem_values() {
             Ok(vals) => vals,
             Err(msg) => {
                 // Uh oh something fucky happened with the memory. Let's just try reattaching
@@ -155,31 +162,60 @@ impl State {
             }
         };
 
-        let igt = values.level_time.current;
-        let menu_state = values.menu_state.current;
-        let is_loading = values.is_loading.current;
+        // There's no good way to know if we're on gold until we hit a gold level
+        if vars.miss_idx.current == 15 && !self.is_gold {
+            self.miss_idx_order = vec![1, 2, 3, 4, 5, 15, 6, 7, 16, 9, 17, 10, 11, 12, 13, 14];
+            self.is_gold = true;
+        }
 
-        if igt == 0 && menu_state == 10 {
-            asr::timer::reset();
+        let timer_state = asr::timer::state();
+        if self.should_start(timer_state, &vars) {
             asr::timer::start();
-        }
-
-        if menu_state == 13 {
+        } else if self.should_split(timer_state, &vars) {
             asr::timer::split();
-        }
-
-        if menu_state == 7 || menu_state == 9 {
+            self.split_idx += 1;
+        } else if self.should_reset(timer_state, &vars) {
             asr::timer::reset();
+            self.split_idx = 0;
         }
 
-        if (is_loading != 0 && menu_state != 9) || menu_state == 6 || menu_state == 12 {
-            asr::timer::pause_game_time();
-        } else {
-            asr::timer::resume_game_time();
+        // Handle game timer
+        if timer_state == TimerState::Running {
+            if (vars.is_loading.current != 0 && vars.menu_state.current != 9)
+                || vars.menu_state.current == 6
+                || vars.menu_state.current == 12
+            {
+                asr::timer::pause_game_time();
+            } else {
+                asr::timer::resume_game_time();
+            }
         }
     }
 
-    fn update_mem_values(&mut self) -> Result<Values, String> {
+    fn should_start(&self, timer_state: TimerState, vars: &Vars) -> bool {
+        let valid_timer = timer_state == TimerState::NotRunning;
+        valid_timer
+            && vars.miss_idx.current == self.miss_idx_order[self.split_idx]
+            && vars.menu_state.current == 10
+            && vars.is_loading.current != 0
+    }
+
+    fn should_split(&self, timer_state: TimerState, vars: &Vars) -> bool {
+        let valid_timer = timer_state == TimerState::Running;
+        valid_timer
+            && vars.menu_state.current == 12
+            && vars.miss_idx.current == self.miss_idx_order[self.split_idx]
+            && vars.cutscene_name.current.contains("success")
+    }
+
+    fn should_reset(&self, timer_state: TimerState, vars: &Vars) -> bool {
+        let valid_timer = timer_state == TimerState::Running || timer_state == TimerState::Ended;
+        valid_timer
+            && vars.miss_idx.current == self.miss_idx_order[0]
+            && vars.menu_state.current == 7
+    }
+
+    fn update_mem_values(&mut self) -> Result<Vars, String> {
         let process = match &self.main_process {
             Some(process) => process,
             None => return Err("Could not load main process.".to_owned()),
@@ -196,7 +232,7 @@ impl State {
             old: Self::convert_cstring(cutscene_name.old)?,
             current: Self::convert_cstring(cutscene_name.current)?,
         };
-        Ok(Values {
+        Ok(Vars {
             miss_idx: self.values.miss_idx.update(process, base)?,
             menu_state: self.values.menu_state.update(process, base)?,
             is_loading: self.values.is_loading.update(process, base)?,
@@ -225,6 +261,9 @@ static STATE: Spinlock<State> = const_spinlock(State {
     base_address: None,
     values: Lazy::new(Default::default),
     settings: None,
+    miss_idx_order: vec![],
+    split_idx: 0,
+    is_gold: false,
 });
 
 #[no_mangle]
