@@ -125,10 +125,7 @@ impl State {
             Some(process) => {
                 // Games closed so we'll detach and look for it next update
                 if !process.is_open() {
-                    self.main_process = None;
-                    self.base_address = None;
-                    self.values = Default::default();
-                    asr::set_tick_rate(IDLE_TICK_RATE);
+                    self.detach_process();
                     return;
                 }
             }
@@ -138,10 +135,7 @@ impl State {
             // Uh oh something fucky happened with the memory. Let's just try reattaching
             // next update?
             asr::print_message(&msg);
-            self.main_process = None;
-            self.base_address = None;
-            self.values = Default::default();
-            asr::set_tick_rate(IDLE_TICK_RATE);
+            self.detach_process();
             return;
         }
 
@@ -186,6 +180,13 @@ impl State {
         self.values.level_time.update(process, base)?;
         self.values.cutscene_name.update(process, base)?;
         Ok(())
+    }
+
+    fn detach_process(&mut self) {
+        self.main_process = None;
+        self.base_address = None;
+        self.values = Default::default();
+        asr::set_tick_rate(IDLE_TICK_RATE);
     }
 }
 
