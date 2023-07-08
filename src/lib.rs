@@ -47,7 +47,7 @@ struct Vars {
 #[derive(Clone)]
 struct Watcher<T> {
     pair: Option<asr::watcher::Pair<T>>,
-    path: Vec<u64>,
+    path: Vec<u32>,
 }
 
 impl<T> Default for Watcher<T> {
@@ -57,7 +57,7 @@ impl<T> Default for Watcher<T> {
 }
 
 impl<T> Watcher<T> {
-    fn new(path: &[u64]) -> Self {
+    fn new(path: &[u32]) -> Self {
         Self {
             pair: None,
             path: path.to_owned(),
@@ -71,7 +71,7 @@ impl<T: bytemuck::CheckedBitPattern> Watcher<T> {
         process: &asr::Process,
         base: asr::Address,
     ) -> Result<asr::watcher::Pair<T>, &str> {
-        let new_val = match process.read_pointer_path64(base, &self.path) {
+        let new_val = match process.read_pointer_path32(base, &self.path) {
             Ok(val) => val,
             Err(_) => return Err("Failed to update value from memory."),
         };
