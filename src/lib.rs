@@ -178,8 +178,9 @@ impl State {
 
         let timer_state = asr::timer::state();
 
-        if timer_state == TimerState::NotRunning && vars.difficulty.current != 0 {
-            self.split_idx = 1;
+        if timer_state == TimerState::NotRunning {
+            self.split_idx = if vars.difficulty.current == 0 { 0 } else { 1 };
+            self.has_split_on_eye = false;
         }
 
         if self.should_start(timer_state, &vars) {
@@ -189,8 +190,6 @@ impl State {
             self.split_idx += 1;
         } else if self.should_reset(timer_state, &vars) {
             asr::timer::reset();
-            self.split_idx = 0;
-            self.has_split_on_eye = false;
         }
 
         // Various runtime changes
