@@ -33,6 +33,7 @@ struct MemoryWatchers {
     level_time: Watcher<i32>,
     difficulty: Watcher<i32>,
     cutscene_name: Watcher<asr::string::ArrayCString<255>>,
+    eye_split: Watcher<i8>,
 }
 
 struct Vars {
@@ -42,6 +43,7 @@ struct Vars {
     level_time: asr::watcher::Pair<i32>,
     difficulty: asr::watcher::Pair<i32>,
     cutscene_name: asr::watcher::Pair<String>,
+    eye_split: asr::watcher::Pair<i8>,
 }
 
 #[derive(Clone)]
@@ -95,6 +97,7 @@ struct State {
     miss_idx_order: Vec<i32>,
     split_idx: usize,
     is_gold: bool,
+    has_split_on_eye: bool,
 }
 
 impl State {
@@ -122,10 +125,12 @@ impl State {
         self.values.level_time.path = vec![0x4C6234];
         self.values.difficulty.path = vec![0x5C1280];
         self.values.cutscene_name.path = vec![0x5CF9DE];
+        self.values.eye_split.path = vec![0x5C1284, 0xC8, 0x18, 0xFC, 0x0, 0x10];
 
         self.miss_idx_order = vec![1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14];
         self.split_idx = 0;
         self.is_gold = false;
+        self.has_split_on_eye = false;
 
         asr::set_tick_rate(RUNNING_TICK_RATE);
         Ok(())
@@ -177,7 +182,18 @@ impl State {
             self.split_idx = 1;
         }
 
-        // Handle game timer
+        if self.should_start(timer_state, &vars) {
+            asr::timer::start();
+        } else if self.should_split(timer_state, &vars) {
+            asr::timer::split();
+            self.split_idx += 1;
+        } else if self.should_reset(timer_state, &vars) {
+            asr::timer::reset();
+            self.split_idx = 0;
+            self.has_split_on_eye = false;
+        }
+
+        // Various runtime changes
         if timer_state == TimerState::Running {
             if (vars.is_loading.current != 0 && vars.menu_state.current != 9)
                 || vars.menu_state.current == 6
@@ -187,16 +203,12 @@ impl State {
             } else {
                 asr::timer::resume_game_time();
             }
-        }
 
-        if self.should_start(timer_state, &vars) {
-            asr::timer::start();
-        } else if self.should_split(timer_state, &vars) {
-            asr::timer::split();
-            self.split_idx += 1;
-        } else if self.should_reset(timer_state, &vars) {
-            asr::timer::reset();
-            self.split_idx = 0;
+            if !self.has_split_on_eye && vars.miss_idx.current == 14 && vars.eye_split.current == 1
+            {
+                self.has_split_on_eye = true;
+                self.split_idx -= 1;
+            }
         }
     }
 
@@ -210,10 +222,18 @@ impl State {
 
     fn should_split(&self, timer_state: TimerState, vars: &Vars) -> bool {
         let valid_timer = timer_state == TimerState::Running;
-        valid_timer
-            && vars.menu_state.current == 12
+        if !valid_timer {
+            return false;
+        }
+
+        let eye_objective_triggered =
+            !self.has_split_on_eye && vars.miss_idx.current == 14 && vars.eye_split.current == 1;
+
+        let mission_finished = vars.menu_state.current == 12
             && vars.miss_idx.current == self.miss_idx_order[self.split_idx]
-            && vars.cutscene_name.current.contains("success")
+            && vars.cutscene_name.current.contains("success");
+
+        mission_finished || eye_objective_triggered
     }
 
     fn should_reset(&self, timer_state: TimerState, vars: &Vars) -> bool {
@@ -241,6 +261,13 @@ impl State {
             old: Self::convert_cstring(cutscene_name.old)?,
             current: Self::convert_cstring(cutscene_name.current)?,
         };
+
+        // Eye split pointer path isn't always valid!
+        let eye_split = match self.values.eye_split.update(process, base) {
+            Ok(pair) => pair,
+            Err(_) => asr::watcher::Pair { old: 0, current: 0 },
+        };
+
         Ok(Vars {
             miss_idx: self.values.miss_idx.update(process, base)?,
             menu_state: self.values.menu_state.update(process, base)?,
@@ -248,6 +275,7 @@ impl State {
             level_time: self.values.level_time.update(process, base)?,
             difficulty: self.values.difficulty.update(process, base)?,
             cutscene_name,
+            eye_split,
         })
     }
 
@@ -274,6 +302,7 @@ static STATE: Spinlock<State> = const_spinlock(State {
     miss_idx_order: vec![],
     split_idx: 0,
     is_gold: false,
+    has_split_on_eye: false,
 });
 
 #[no_mangle]
