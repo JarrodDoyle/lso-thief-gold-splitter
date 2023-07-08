@@ -31,6 +31,7 @@ struct MemoryWatchers {
     menu_state: Watcher<i32>,
     is_loading: Watcher<i32>,
     level_time: Watcher<i32>,
+    difficulty: Watcher<i32>,
     cutscene_name: Watcher<asr::string::ArrayCString<255>>,
 }
 
@@ -39,6 +40,7 @@ struct Vars {
     menu_state: asr::watcher::Pair<i32>,
     is_loading: asr::watcher::Pair<i32>,
     level_time: asr::watcher::Pair<i32>,
+    difficulty: asr::watcher::Pair<i32>,
     cutscene_name: asr::watcher::Pair<String>,
 }
 
@@ -118,6 +120,7 @@ impl State {
         self.values.menu_state.path = vec![0x3D8808];
         self.values.is_loading.path = vec![0x3D89B0];
         self.values.level_time.path = vec![0x4C6234];
+        self.values.difficulty.path = vec![0x5C1280];
         self.values.cutscene_name.path = vec![0x5CF9DE];
 
         self.miss_idx_order = vec![1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14];
@@ -169,14 +172,9 @@ impl State {
         }
 
         let timer_state = asr::timer::state();
-        if self.should_start(timer_state, &vars) {
-            asr::timer::start();
-        } else if self.should_split(timer_state, &vars) {
-            asr::timer::split();
-            self.split_idx += 1;
-        } else if self.should_reset(timer_state, &vars) {
-            asr::timer::reset();
-            self.split_idx = 0;
+
+        if timer_state == TimerState::NotRunning && vars.difficulty.current != 0 {
+            self.split_idx = 1;
         }
 
         // Handle game timer
@@ -189,6 +187,16 @@ impl State {
             } else {
                 asr::timer::resume_game_time();
             }
+        }
+
+        if self.should_start(timer_state, &vars) {
+            asr::timer::start();
+        } else if self.should_split(timer_state, &vars) {
+            asr::timer::split();
+            self.split_idx += 1;
+        } else if self.should_reset(timer_state, &vars) {
+            asr::timer::reset();
+            self.split_idx = 0;
         }
     }
 
@@ -210,8 +218,9 @@ impl State {
 
     fn should_reset(&self, timer_state: TimerState, vars: &Vars) -> bool {
         let valid_timer = timer_state == TimerState::Running || timer_state == TimerState::Ended;
+        let start_split = if vars.difficulty.current == 0 { 0 } else { 1 };
         valid_timer
-            && vars.miss_idx.current == self.miss_idx_order[0]
+            && vars.miss_idx.current == self.miss_idx_order[start_split]
             && vars.menu_state.current == 7
     }
 
@@ -237,6 +246,7 @@ impl State {
             menu_state: self.values.menu_state.update(process, base)?,
             is_loading: self.values.is_loading.update(process, base)?,
             level_time: self.values.level_time.update(process, base)?,
+            difficulty: self.values.difficulty.update(process, base)?,
             cutscene_name,
         })
     }
